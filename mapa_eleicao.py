@@ -164,7 +164,7 @@ const D=__DATA__,G=__GEO__,REG=["Norte","Nordeste","Centro-Oeste","Sudeste","Sul
 const late=()=>{const a=D.br&&(D.br.ht||D.br.hg),b=D.ht_ufs||D.hg_ufs;if(!a||!b)return 0;const t=x=>x.split(":").reduce((s,v)=>s*60+ +v,0);return Math.round((t(b)-t(a))/60)};
 const $=id=>document.getElementById(id),by={};D.ufs.forEach(u=>by[u.uf]=u);
 const n=x=>Math.round(x).toLocaleString("pt-BR"),p=x=>x.toFixed(2).replace(".",",")+"%";
-let sel=new Set(REG);$("ts").textContent="Atualizado em "+D.ts+" · % = votos válidos · projeção linear por estado";
+let sel=new Set(REG);const tsf=()=>{const m=Math.max(0,Math.floor((Date.now()-new Date(D.iso))/60000));$("ts").innerHTML="Atualizado em "+D.ts+" · <b style='color:"+(m>12?"#e5534b":"#4cd07d")+"'>há "+m+" min</b> · % = votos válidos · projeção linear por estado"};tsf();setInterval(tsf,15000);
 function proj(u){const f=u.pct/100;return f>0?{l:u.lula/f,f:u.flavio/f,v:u.validos/f}:{l:0,f:0,v:0}}
 function col(u){if(!u||!u.validos)return"#444";const m=(u.flavio-u.lula)/u.validos*100,t=Math.min(Math.abs(m)/30,1),
 b=m>0?[26,152,80]:[215,48,39],e=235;return"rgb("+b.map(c=>Math.round(e+(c-e)*(.25+.75*t))).join(",")+")"}
@@ -241,7 +241,7 @@ def main():
         print(f"[aviso] arquivo BR: {e}", file=sys.stderr)
         br = None
     agora = dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M:%S (Brasília)")
-    html = HTML.replace("__DATA__", json.dumps({"ufs": ufs, "ts": agora, "br": br, "hg_ufs": max((u.get("hg", "") for u in ufs), default=""), "ht_ufs": max((ht_brt(u) for u in ufs if u["uf"] != "ZZ"), default="")}, ensure_ascii=False)) \
+    html = HTML.replace("__DATA__", json.dumps({"ufs": ufs, "ts": agora, "iso": dt.datetime.now(dt.timezone.utc).isoformat(), "br": br, "hg_ufs": max((u.get("hg", "") for u in ufs), default=""), "ht_ufs": max((ht_brt(u) for u in ufs if u["uf"] != "ZZ"), default="")}, ensure_ascii=False)) \
                .replace("__GEO__", json.dumps(geo(), separators=(",", ":")))
     os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
