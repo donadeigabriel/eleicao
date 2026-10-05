@@ -7,13 +7,17 @@ Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (opcionais; sem eles só gera o HTML)
      Simulado: TSE_BASE=https://resultados-sim.tse.jus.br/simulado/simulado2026 TSE_ELE=21270
      DEBUG=1 imprime as chaves do JSON e os candidatos encontrados.
 """
-import os, re, sys, json, unicodedata, datetime as dt
+import os, re, sys, json, math, unicodedata, datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 BASE = os.getenv("TSE_BASE", "https://resultados.tse.jus.br/oficial")
 CICLO = os.getenv("TSE_CICLO", "ele2026")
 ELE = os.getenv("TSE_ELE", "6257")
 OUT = os.getenv("OUT_FILE", "mapa_eleicao.html")
+BASE_ELE = os.getenv("BASE_ELE", "")  # eleição de referência por município (ex.: 6257 = 1º turno). Vazio = projeção linear
+BASE_FILE = os.getenv("BASE_FILE", "base_municipios.json")
+WORKERS = int(os.getenv("PROJ_WORKERS", "16"))
 H = {"User-Agent": "Mozilla/5.0 (mapa-eleicao)"}
 
 REGIOES = {
@@ -95,7 +99,118 @@ def parse(js):
     s = js.get("s") if isinstance(js.get("s"), dict) else {}
     ts, st = to_int(s.get("ts", 0)), to_int(s.get("st", 0))
     pct = to_float(s["pst"]) if s.get("pst") is not None else (100.0 * st / ts if ts else 0.0)
-    return {"lula": lula, "flavio": flavio, "validos": validos, "pct": min(pct, 100.0), "ts": ts, "st": st, "hg": js.get("hg", ""), "ht": js.get("ht", "")}
+    return {"lula": lula, "flavio": flavio, "validos": validos, "pct": min(pct, 100.0), "ts": ts, "st": st, "hg": js.get("hg", ""), "ht": js.get("ht", ""),
+            "fe": min(to_float(js["e"]["pest"]) if isinstance(js.get("e"), dict) and js["e"].get("pest") is not None else pct, 100.0),
+            "turno": str(js.get("t", ""))}
+
+
+# ---------- Projeção por município (swing), só nos bastidores ----------
+def logit(s):
+    s = min(max(s, 1e-4), 1 - 1e-4)
+    return math.log(s / (1 - s))
+
+
+def inv(x):
+    return 1 / (1 + math.exp(-x))
+
+
+def lista_municipios(ele):
+    cfg = get_json(f"{BASE}/{CICLO}/{ele}/config/mun-e{int(ele):06d}-cm.json")
+    out = [(str(a.get("cd", "")).upper(), str(m.get("cd")))
+           for a in cfg.get("abr", []) for m in a.get("mu", []) if str(a.get("cd", "")).upper() != "ZZ"]
+    if not out:
+        raise RuntimeError("lista de municípios vazia")
+    return out
+
+
+def baixa(ele, lista):
+    def um(t):
+        uf, cd = t
+        try:
+            return t, parse(get_json(f"{BASE}/{CICLO}/{ele}/dados/{uf.lower()}/{uf.lower()}{cd}-c0001-e{int(ele):06d}-u.json"))
+        except Exception:
+            return t, None
+    with ThreadPoolExecutor(WORKERS) as ex:
+        res = dict(ex.map(um, lista))
+    ok = sum(1 for v in res.values() if v)
+    print(f"[proj] eleição {ele}: {ok}/{len(lista)} municípios")
+    if ok < 0.9 * len(lista):
+        raise RuntimeError(f"só {ok}/{len(lista)} municípios baixados (eleição {ele})")
+    return res
+
+
+def carrega_base(lista):
+    if os.path.exists(BASE_FILE):
+        with open(BASE_FILE, encoding="utf-8") as f:
+            return {tuple(k.split("|")): v for k, v in json.load(f).items()}
+    res = {k: v for k, v in baixa(BASE_ELE, lista).items() if v}
+    with open(BASE_FILE, "w", encoding="utf-8") as f:
+        json.dump({f"{k[0]}|{k[1]}": v for k, v in res.items()}, f)
+    return res
+
+
+def proj_mun(a, b, d_uf, k):
+    L, F, V = a["lula"], a["flavio"], a["validos"]
+    fe = min(max(a["fe"] / 100, 0.0), 1.0)
+    if fe >= 0.999:
+        return L, F
+    tref = b["validos"] * k if b and b["validos"] else None
+    tobs = V / fe if fe > 0.02 and V > 0 else None
+    T = fe * tobs + (1 - fe) * tref if (tobs and tref) else (tobs or tref or V)
+    R = max(T - V, 0.0)
+    two = L + F
+    if R == 0 or not V:
+        return L, F
+    if b and d_uf is not None and b["lula"] + b["flavio"] > 0:
+        s1 = b["lula"] / (b["lula"] + b["flavio"])
+        d = d_uf
+        if two > 0 and fe >= 0.2:  # swing do próprio município, encolhido em direção ao do estado
+            d = fe * (logit(L / two) - logit(s1)) + (1 - fe) * d_uf
+        s = inv(logit(s1) + d)
+    elif two > 0:
+        s = L / two
+    else:
+        return L, F
+    R *= two / V
+    return L + R * s, F + R * (1 - s)
+
+
+def aplica_swing(ufs, atual, base):
+    ap, nac, por_uf = {}, [0.0] * 4, {}
+    for (uf, cd), a in atual.items():
+        if not a:
+            continue
+        b = base.get((uf, cd))
+        por_uf.setdefault(uf, []).append((a, b))
+        if not b or a["fe"] < 80 or a["lula"] + a["flavio"] <= 0 or b["lula"] + b["flavio"] <= 0:
+            continue
+        w = a["lula"] + a["flavio"]
+        d = logit(a["lula"] / w) - logit(b["lula"] / (b["lula"] + b["flavio"]))
+        for x in (ap.setdefault(uf, [0.0] * 4), nac):
+            x[0] += w * d
+            x[1] += w
+            x[2] += a["validos"] / (a["fe"] / 100)
+            x[3] += b["validos"]
+    n = 0
+    for u in ufs:
+        t = ap.get(u["uf"])
+        t = t if t and t[1] > 0 else nac
+        if u["uf"] not in por_uf or t[1] <= 0:
+            continue
+        d_uf = t[0] / t[1]
+        k = min(max(t[2] / t[3], 0.5), 1.5) if t[3] else 1.0
+        pl = pf = 0.0
+        for a, b in por_uf[u["uf"]]:
+            l, f = proj_mun(a, b, d_uf, k)
+            pl, pf = pl + l, pf + f
+        lin = u["validos"] / (u["pct"] / 100) if u["pct"] > 0 else 0
+        if lin and not (0.5 * lin <= pl + pf <= 1.5 * lin):
+            print(f"[proj] {u['uf']}: total fora do esperado ({pl+pf:.0f} vs {lin:.0f}); mantendo linear", file=sys.stderr)
+            continue
+        u["pj"] = {"l": pl, "f": pf, "v": pl + pf}
+        n += 1
+    print(f"[proj] swing aplicado em {n} UFs; swing nacional (logit) = {nac[0]/nac[1]:+.3f}" if nac[1] else "[proj] sem municípios de aprendizado")
+    return n
 
 
 def coleta():
@@ -164,8 +279,8 @@ const D=__DATA__,G=__GEO__,REG=["Norte","Nordeste","Centro-Oeste","Sudeste","Sul
 const late=()=>{const a=D.br&&(D.br.ht||D.br.hg),b=D.ht_ufs||D.hg_ufs;if(!a||!b)return 0;const t=x=>x.split(":").reduce((s,v)=>s*60+ +v,0);return Math.round((t(b)-t(a))/60)};
 const $=id=>document.getElementById(id),by={};D.ufs.forEach(u=>by[u.uf]=u);
 const n=x=>Math.round(x).toLocaleString("pt-BR"),p=x=>x.toFixed(2).replace(".",",")+"%";
-let sel=new Set(REG);const tsf=()=>{const m=Math.max(0,Math.floor((Date.now()-new Date(D.iso))/60000));$("ts").innerHTML="Atualizado em "+D.ts+" · <b style='color:"+(m>12?"#e5534b":"#4cd07d")+"'>há "+m+" min</b> · % = votos válidos · projeção linear por estado"};tsf();setInterval(tsf,15000);
-function proj(u){const f=u.pct/100;return f>0?{l:u.lula/f,f:u.flavio/f,v:u.validos/f}:{l:0,f:0,v:0}}
+let sel=new Set(REG);const tsf=()=>{const m=Math.max(0,Math.floor((Date.now()-new Date(D.iso))/60000));$("ts").innerHTML="Atualizado em "+D.ts+" · <b style='color:"+(m>12?"#e5534b":"#4cd07d")+"'>há "+m+" min</b> · % = votos válidos · projeção "+(D.metodo||"linear por estado")};tsf();setInterval(tsf,15000);
+function proj(u){if(u.pj)return u.pj;const f=u.pct/100;return f>0?{l:u.lula/f,f:u.flavio/f,v:u.validos/f}:{l:0,f:0,v:0}}
 function col(u){if(!u||!u.validos)return"#444";const m=(u.flavio-u.lula)/u.validos*100,t=Math.min(Math.abs(m)/30,1),
 b=m>0?[26,152,80]:[215,48,39],e=235;return"rgb("+b.map(c=>Math.round(e+(c-e)*(.25+.75*t))).join(",")+")"}
 // mapa
@@ -235,13 +350,24 @@ def ht_brt(u):
 
 def main():
     ufs = coleta()
+    metodo = "linear por estado"
+    try:
+        if BASE_ELE and any(u.get("turno") == "2" for u in ufs):
+            lista = lista_municipios(ELE)
+            atual = baixa(ELE, lista)
+            if aplica_swing(ufs, atual, carrega_base(lista)):
+                metodo = "por município (swing vs 1º turno)"
+    except Exception as e:
+        print(f"[aviso] projeção por município indisponível ({e}); usando linear", file=sys.stderr)
+        for u in ufs:
+            u.pop("pj", None)
     try:
         br = parse(get_json(url_uf("br")))
     except Exception as e:
         print(f"[aviso] arquivo BR: {e}", file=sys.stderr)
         br = None
     agora = dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M:%S (Brasília)")
-    html = HTML.replace("__DATA__", json.dumps({"ufs": ufs, "ts": agora, "iso": dt.datetime.now(dt.timezone.utc).isoformat(), "br": br, "hg_ufs": max((u.get("hg", "") for u in ufs), default=""), "ht_ufs": max((ht_brt(u) for u in ufs if u["uf"] != "ZZ"), default="")}, ensure_ascii=False)) \
+    html = HTML.replace("__DATA__", json.dumps({"ufs": ufs, "ts": agora, "iso": dt.datetime.now(dt.timezone.utc).isoformat(), "metodo": metodo, "br": br, "hg_ufs": max((u.get("hg", "") for u in ufs), default=""), "ht_ufs": max((ht_brt(u) for u in ufs if u["uf"] != "ZZ"), default="")}, ensure_ascii=False)) \
                .replace("__GEO__", json.dumps(geo(), separators=(",", ":")))
     os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
