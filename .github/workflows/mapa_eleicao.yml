@@ -1,8 +1,9 @@
+# Salve como .github/workflows/mapa_eleicao.yml (script mapa_eleicao.py na raiz do repositório)
 name: mapa-eleicao
 on:
   workflow_dispatch:
   schedule:
-    - cron: "2-59/5 * * * *"
+    - cron: "*/5 * * * *"
 permissions:
   contents: read
   pages: write
@@ -21,10 +22,19 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install requests
+      - uses: actions/cache@v4   # guarda a base do 1º turno por município entre as rodadas
+        with:
+          path: base_municipios.json
+          key: base-1turno-6257
       - run: python mapa_eleicao.py
         env:
           OUT_FILE: site/index.html
-          NO_TELEGRAM: "1"
+          NO_TELEGRAM: "1"   # apague esta linha se quiser continuar recebendo no Telegram
+          BASE_ELE: "6257"   # 1º turno = base do swing. Só vale no 2º turno (veja TSE_ELE abaixo)
+          # No 2º turno, descomente e coloque o código da eleição do 2º turno (veja ele-c.json):
+          # TSE_ELE: "XXXX"
+          # TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
       - id: deploy
