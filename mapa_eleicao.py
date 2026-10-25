@@ -10,7 +10,7 @@ Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (opcionais; sem eles só gera o HTML)
      Simulado: TSE_BASE=https://resultados-sim.tse.jus.br/simulado/simulado2026 TSE_ELE=21270
      DEBUG=1 imprime as chaves do JSON e os candidatos encontrados.
 """
-import os, re, sys, json, math, unicodedata, datetime as dt
+import os, re, sys, json, math, time, unicodedata, datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 import requests
 
@@ -62,10 +62,23 @@ def to_float(x):
     return float(str(x).replace(".", "").replace(",", ".") or 0)
 
 
-def get_json(url):
-    r = requests.get(url, headers=H, timeout=30)
-    r.raise_for_status()
-    return r.json()
+RETRY = (429, 500, 502, 503, 504)
+
+
+def get_json(url, tent=5):
+    """GET com novas tentativas em 429/5xx/timeout (404 e afins falham na hora)."""
+    for i in range(tent):
+        try:
+            r = requests.get(url, headers=H, timeout=30)
+            if r.status_code in RETRY:
+                raise requests.HTTPError(str(r.status_code), response=r)
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            st = getattr(getattr(e, "response", None), "status_code", None)
+            if not (st in RETRY or st is None) or i == tent - 1:
+                raise
+            time.sleep(2 * (i + 1) ** 2)
 
 
 def url_uf(uf):
@@ -259,17 +272,30 @@ def coleta():
     return ufs
 
 
+GEO_FILE = os.getenv("GEO_FILE", "malha_br.json")
+
+
 def geo():
-    try:
-        u = ("https://servicodados.ibge.gov.br/api/v3/malhas/paises/BR"
-             "?formato=application/vnd.geo+json&qualidade=minima&intrarregiao=UF")
-        g = get_json(u)
-        for f in g["features"]:
-            f["properties"] = {"uf": IBGE.get(str(f["properties"].get("codarea")), "")}
-        return g
-    except Exception as e:
-        print(f"[aviso] malha IBGE indisponível: {e}", file=sys.stderr)
-        return {"features": []}
+    g = None
+    if os.path.exists(GEO_FILE):
+        try:
+            with open(GEO_FILE, encoding="utf-8") as f:
+                g = json.load(f)
+            print(f"[geo] malha local: {GEO_FILE}")
+        except Exception as e:
+            print(f"[aviso] {GEO_FILE} ilegível: {e}", file=sys.stderr)
+    if not g or not g.get("features"):
+        try:
+            g = get_json("https://servicodados.ibge.gov.br/api/v3/malhas/paises/BR"
+                         "?formato=application/vnd.geo+json&qualidade=minima&intrarregiao=UF", tent=3)
+        except Exception as e:
+            print(f"[aviso] malha IBGE indisponível: {e}", file=sys.stderr)
+            return {"features": []}
+    for f in g["features"]:
+        p = f.get("properties") or {}
+        if not p.get("uf"):
+            f["properties"] = {"uf": IBGE.get(str(p.get("codarea")), "")}
+    return g
 
 
 HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
