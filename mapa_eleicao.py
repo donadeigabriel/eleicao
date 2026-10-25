@@ -3,7 +3,10 @@
 
 Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (opcionais; sem eles só gera o HTML)
      TSE_BASE  (padrão https://resultados.tse.jus.br/oficial)
-     TSE_CICLO (padrão ele2026)  TSE_ELE (padrão 6257 = Eleição Geral Federal 1º turno)
+     TSE_CICLO (padrão ele2026)
+     TSE_ELE   (opcional) ID da eleição a apurar. Vazio = detecta sozinho o 2º turno
+               (procura logo após o ID do 1º turno, 6257, o arquivo do Brasil com t=2).
+     BASE_ELE  (padrão 6257 = 1º turno) eleição de referência por município para o swing.
      Simulado: TSE_BASE=https://resultados-sim.tse.jus.br/simulado/simulado2026 TSE_ELE=21270
      DEBUG=1 imprime as chaves do JSON e os candidatos encontrados.
 """
@@ -13,9 +16,10 @@ import requests
 
 BASE = os.getenv("TSE_BASE", "https://resultados.tse.jus.br/oficial")
 CICLO = os.getenv("TSE_CICLO", "ele2026")
-ELE = os.getenv("TSE_ELE", "6257")
+ELE_1T = "6257"  # Eleição Geral Federal 1º turno (presidente)
+ELE = os.getenv("TSE_ELE") or ELE_1T  # se TSE_ELE vazio, descobre_ele2() tenta achar o 2º turno
 OUT = os.getenv("OUT_FILE", "mapa_eleicao.html")
-BASE_ELE = os.getenv("BASE_ELE", "")  # eleição de referência por município (ex.: 6257 = 1º turno). Vazio = projeção linear
+BASE_ELE = os.getenv("BASE_ELE") or ELE_1T  # eleição de referência por município (1º turno)
 BASE_FILE = os.getenv("BASE_FILE", "base_municipios.json")
 WORKERS = int(os.getenv("PROJ_WORKERS", "16"))
 H = {"User-Agent": "Mozilla/5.0 (mapa-eleicao)"}
@@ -67,6 +71,26 @@ def get_json(url):
 def url_uf(uf):
     uf = uf.lower()
     return f"{BASE}/{CICLO}/{ELE}/dados/{uf}/{uf}-c0001-e{int(ELE):06d}-u.json"
+
+
+def descobre_ele2():
+    """Se TSE_ELE não foi fixado, procura o ID do 2º turno (presidente, t=2) logo após o do 1º."""
+    global ELE
+    if os.getenv("TSE_ELE"):
+        print(f"[ele] usando TSE_ELE={ELE} (base do swing: {BASE_ELE})")
+        return
+    base = int(ELE_1T)
+    for cand in range(base + 1, base + 15):
+        try:
+            js = get_json(f"{BASE}/{CICLO}/{cand}/dados/br/br-c0001-e{cand:06d}-u.json")
+            if str(js.get("t")) == "2":
+                ELE = str(cand)
+                print(f"[ele] 2º turno detectado: ELE={ELE} (base do swing: {BASE_ELE})")
+                return
+        except Exception:
+            continue
+    print(f"[aviso] não achei o 2º turno automaticamente; usando ELE={ELE}. "
+          "Defina TSE_ELE com o ID correto.", file=sys.stderr)
 
 
 def candidatos(o, acc=None):
@@ -349,6 +373,7 @@ def ht_brt(u):
 
 
 def main():
+    descobre_ele2()
     ufs = coleta()
     metodo = "linear por estado"
     try:
@@ -373,7 +398,7 @@ def main():
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(html)
     L, F, V = (sum(u[k] for u in ufs) for k in ("lula", "flavio", "validos"))
-    leg = f"Apuração presidente — {agora}\nLula {100*L/V:.2f}% | Flávio {100*F/V:.2f}%" if V else f"Apuração — {agora} (sem dados ainda)"
+    leg = f"Apuração presidente (2º turno) — {agora}\nLula {100*L/V:.2f}% | Flávio {100*F/V:.2f}%" if V else f"Apuração — {agora} (sem dados ainda)"
     if br and br["validos"]:
         leg += (f"\nArquivo BR do TSE: Lula {100*br['lula']/br['validos']:.2f}% | "
                 f"Flávio {100*br['flavio']/br['validos']:.2f}% | seções {br['pct']:.2f}% (gerado {br['hg']})")
