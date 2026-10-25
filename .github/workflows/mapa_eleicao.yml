@@ -1,4 +1,5 @@
-# Salve como .github/workflows/mapa_eleicao.yml (script mapa_eleicao.py na raiz do repositório)
+# Salve como .github/workflows/mapa_eleicao.yml
+# Na raiz do repositório: mapa_eleicao.py e malha_br.json
 name: mapa-eleicao
 on:
   workflow_dispatch:
@@ -10,10 +11,11 @@ permissions:
   id-token: write
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false   # não cancela a rodada em andamento (a 1ª precisa terminar para salvar o cache)
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -30,9 +32,9 @@ jobs:
         env:
           OUT_FILE: site/index.html
           NO_TELEGRAM: "1"   # apague esta linha se quiser continuar recebendo no Telegram
-          BASE_ELE: "6257"   # 1º turno = base do swing. Só vale no 2º turno (veja TSE_ELE abaixo)
-          # No 2º turno, descomente e coloque o código da eleição do 2º turno (veja ele-c.json):
-          # TSE_ELE: "XXXX"
+          BASE_ELE: "6257"   # 1º turno = base do swing
+          TSE_ELE: "6258"    # 2º turno (detectado no log)
+          PROJ_WORKERS: "6"  # menos requisições simultâneas (evita 429 do TSE)
           # TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           # TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - uses: actions/upload-pages-artifact@v3
